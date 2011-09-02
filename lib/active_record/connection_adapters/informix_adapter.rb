@@ -48,11 +48,15 @@ module ActiveRecord
         return if !connection.is_a?(ConnectionAdapters::InformixAdapter)
         self.class.columns.each do |c|
           value = self[c.name]
-          next if ![:text, :binary].include? c.type || value.nil? || value == ''
-          connection.raw_connection.execute(<<-end_sql, StringIO.new(value))
+          next if ![:text, :binary].include? c.type 
+          
+          unless value.nil? || (value == '')
+#            Rails.logger.warn("Writing lob: #{c.type} : #{value}")
+            connection.raw_connection.execute(<<-end_sql, StringIO.new(value))
               UPDATE #{self.class.table_name} SET #{c.name} = ?
               WHERE #{self.class.primary_key} = #{quote_value(id)}
           end_sql
+          end
         end
       end
   end # class Base
@@ -60,8 +64,10 @@ module ActiveRecord
   module ConnectionAdapters
     class InformixColumn < Column
       def initialize(column)
+#        Rails.logger.warn("In initialize column #{column}")
         sql_type = make_type(column[:stype], column[:length],
-                             column[:precision], column[:scale])
+                             column[:precision], column[:scale], 
+                             column[:xid])
         super(column[:name], column[:default], sql_type, column[:nullable])
       end
 
@@ -70,7 +76,7 @@ module ActiveRecord
                               LIST LVARCHAR MONEY MULTISET NCHAR NUMERIC
                               NVARCHAR SERIAL SERIAL8 VARCHAR).freeze
 
-        def make_type(type, limit, prec, scale)
+        def make_type(type, limit, prec, scale, extended)
           type.sub!(/money/i, 'DECIMAL')
           if IFX_TYPES_SUBSET.include? type.upcase
             if prec == 0
@@ -83,6 +89,8 @@ module ActiveRecord
             type
           elsif type =~ /byte/i
             "binary"
+          elsif type =~ /VARIABLE-LENGTH OPAQUE TYPE/ && extended == 5
+            "boolean"
           else
             type
           end
@@ -90,7 +98,8 @@ module ActiveRecord
 
         def simplified_type(sql_type)
           if sql_type =~ /serial/i
-            :primary_key
+#            :primary_key
+            :integer
           else
             super
           end
@@ -151,7 +160,7 @@ module ActiveRecord
       end
 
       def select_one(sql, name = nil)
-        add_limit!(sql, :limit => 1)
+        add_limit_offset!(sql, :limit => 1)
         result = select(sql, name)
         result.first if result
       end
@@ -207,10 +216,24 @@ module ActiveRecord
         if column && [:binary, :text].include?(column.type)
           return "NULL"
         end
-        if column && column.type == :date
-          return "'#{value.mon}/#{value.day}/#{value.year}'"
-        end
+#        elsif column && column.type == :date && !value.nil?
+#          Rails.logger.warn("Converting date to informix format from string in quote #{value}")
+#          value = value.to_date if !value.acts_like?(:date)
+#          return "'#{value.mon}/#{value.day}/#{value.year}'"
+#         end
         super
+      end
+
+      def quoted_date(value)
+        super
+      end
+
+      def quoted_true
+        %Q{'t'}
+      end
+
+      def quoted_false
+        %Q{'f'}
       end
 
       # SCHEMA STATEMENTS =====================================
@@ -281,6 +304,18 @@ module ActiveRecord
 
       def structure_drop
         super
+      end
+
+      def primary_key(table)
+        nil
+      end
+
+      def select_rows(sql, name = nil)
+        sql.gsub!(/=\s*null/i, 'IS NULL')
+        c = log(sql, name) { @connection.cursor(sql) }
+        rows = c.open.fetch_all
+        c.free
+        rows
       end
 
       private
