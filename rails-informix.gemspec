@@ -1,9 +1,9 @@
 
 spec = Gem::Specification.new do |s|
-  s.name = PKG_NAME
+  s.name = 'activerecord-informix-adapter'
   s.summary = 'Informix adapter for Active Record'
   s.description = 'Active Record adapter for connecting to an IBM Informix database'
-  s.version = PKG_VERSION
+  s.version = '1.1.2'
 
   s.add_dependency 'activerecord', '>= 1.15.4.7707'
   s.add_dependency 'ruby-informix', '>= 0.7.3'
