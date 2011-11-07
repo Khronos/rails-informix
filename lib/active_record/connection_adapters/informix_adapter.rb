@@ -30,6 +30,8 @@ require 'active_record/connection_adapters/abstract_adapter'
 module ActiveRecord
   class Base
     def self.informix_connection(config) #:nodoc:
+      #Force informix to speak rails date format
+      ENV['DBDATE'] = 'Y4MD-' 
       require 'informix' unless self.class.const_defined?(:Informix)
       require 'stringio'
       
