@@ -1,4 +1,5 @@
 # Copyright (c) 2006-2010, Gerardo Santana Gomez Garrido <gerardo.santana@gmail.com>
+# Rails 3.2 additions by Martin Little (khronos@github) 
 # All rights reserved.
 # 
 # Redistribution and use in source and binary forms, with or without
@@ -26,16 +27,19 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 require 'active_record/connection_adapters/abstract_adapter'
+require 'active_record/connection_adapters/statement_pool'
 
 module ActiveRecord
   class Base
     def self.informix_connection(config) #:nodoc:
-      #Force informix to speak rails date format
-      ENV['DBDATE'] = 'Y4MD-' 
+      config = config.symbolize_keys
+      #Force informix to speak rails date format unless otherwise requested
+      #This solves a number of compatability problems that will otherwise surface
+      ENV['DBDATE'] = config[:date_format] || 'Y4MD-' 
+
       require 'informix' unless self.class.const_defined?(:Informix)
       require 'stringio'
       
-      config = config.symbolize_keys
 
       database    = config[:database].to_s
       username    = config[:username]
@@ -62,15 +66,19 @@ module ActiveRecord
         end
       end
   end # class Base
+    
+
 
   module ConnectionAdapters
     class InformixColumn < Column
       def initialize(column)
-#        Rails.logger.warn("In initialize column #{column}")
         sql_type = make_type(column[:stype], column[:length],
                              column[:precision], column[:scale], 
                              column[:xid])
         super(column[:name], column[:default], sql_type, column[:nullable])
+      end
+      def adapter
+        InformixAdapter
       end
 
       private
@@ -108,6 +116,9 @@ module ActiveRecord
         end
     end
 
+
+
+
     # This adapter requires Ruby/Informix
     # http://ruby-informix.rubyforge.org
     #
@@ -121,6 +132,9 @@ module ActiveRecord
       def initialize(db, logger)
         super
         @ifx_version = db.version.major.to_i
+
+        @quoted_column_names, @quoted_table_names = {}, {}
+
       end
 
       def native_database_types
@@ -144,17 +158,146 @@ module ActiveRecord
         'Informix'
       end
 
-      def prefetch_primary_key?(table_name = nil)
-        true
-      end
- 
       def supports_migrations? #:nodoc:
         true
       end
 
+      def supports_primary_key?
+        true
+      end
+
+      def supports_count_distinct?
+        true
+      end
+
+      def supports_ddl_transactions?
+        true
+      end
+      
+      def supports_bulk_alter?
+        true
+      end
+
+      def supports_savepoints?
+        true
+      end
+
+      #Used to support sequence tables
+      #Requires next_sequence_value
+      def prefetch_primary_key?(table_name = nil)
+        true
+      end
       def default_sequence_name(table, column) #:nodoc:
         "#{table}_seq"
       end
+
+      def supports_index_sort_order?
+        true
+      end
+      
+      #Verify this, might have to change the ruby-informix code 
+      def supports_explain?
+        true
+      end
+ 
+      #TODO - Add support for this
+      def supports_statement_cache?
+        false
+      end
+
+      # QUOTING ===========================================
+      def quote_string(string)
+        string.gsub(/\'/, "''")
+      end
+
+      def quote(value, column = nil)
+        if column && [:binary, :text].include?(column.type)
+          return "NULL"
+        end
+        super
+      end
+
+      def quote_column_name(name) #:nodoc:
+        @quoted_column_names[name] ||= "`#{name.to_s.gsub('`', '``')}`"
+      end
+
+      def quote_table_name(name) #:nodoc:
+        @quoted_table_names[name] ||= quote_column_name(name).gsub('.', '`.`')
+      end
+
+      def quoted_date(value)
+        super
+      end
+
+      def quoted_true
+        %Q{'t'}
+      end
+
+      def quoted_false
+        %Q{'f'}
+      end
+
+      # REFERENTIAL INTEGRITY ====================================
+
+      # Override to turn off referential integrity while executing <tt>&block</tt>.
+      # TODO: Will probably need to implement this
+      #def disable_referential_integrity
+      #  yield
+      #end
+
+      # CONNECTION MANAGEMENT ====================================
+      # Reset the state of this connection, directing the DBMS to clear
+      # transactions and other connection-related server-side state. Usually a
+      # database-dependent operation.
+      #
+      # The default implementation does nothing; the implementation should be
+      # overridden by concrete adapters.
+      def reset!
+        # this should be overridden by concrete adapters
+      end
+
+      ###
+      # Clear any caching the database adapter may be doing, for example
+      # clearing the prepared statement cache. This is database specific.
+      def clear_cache!
+        # this should be overridden by concrete adapters
+      end
+
+      # Returns true if its required to reload the connection between requests for development mode.
+      # This is not the case for Ruby/MySQL and it's not necessary for any adapters except SQLite.
+      def requires_reloading?
+        false
+      end
+
+      # Checks whether the connection to the database is still active (i.e. not stale).
+      # This is done under the hood by calling <tt>active?</tt>. If the connection
+      # is no longer active, then this method will reconnect to the database.
+      def verify!(*ignored)
+        reconnect! unless active?
+      end
+
+      # Provides access to the underlying database driver for this adapter. For
+      # example, this method returns a Mysql object in case of MysqlAdapter,
+      # and a PGconn object in case of PostgreSQLAdapter.
+      #
+      # This is useful for when you need to call a proprietary method such as
+      # PostgreSQL's lo_* methods.
+      def raw_connection
+        @connection
+      end
+
+      #TODO
+      def create_savepoint
+      end
+
+      #TODO
+      def rollback_to_savepoint
+      end
+
+      #TODO
+      def release_savepoint
+      end
+
 
       # DATABASE STATEMENTS =====================================
       def select_all(sql, name = nil)
@@ -209,34 +352,6 @@ module ActiveRecord
         select_one("select #{sequence_name}.nextval id from systables where tabid=1")['id']
       end
 
-      # QUOTING ===========================================
-      def quote_string(string)
-        string.gsub(/\'/, "''")
-      end
-
-      def quote(value, column = nil)
-        if column && [:binary, :text].include?(column.type)
-          return "NULL"
-        end
-#        elsif column && column.type == :date && !value.nil?
-#          Rails.logger.warn("Converting date to informix format from string in quote #{value}")
-#          value = value.to_date if !value.acts_like?(:date)
-#          return "'#{value.mon}/#{value.day}/#{value.year}'"
-#         end
-        super
-      end
-
-      def quoted_date(value)
-        super
-      end
-
-      def quoted_true
-        %Q{'t'}
-      end
-
-      def quoted_false
-        %Q{'f'}
-      end
 
       # SCHEMA STATEMENTS =====================================
       def tables(name = nil)
