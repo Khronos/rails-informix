@@ -28,6 +28,7 @@
 
 require 'active_record/connection_adapters/abstract_adapter'
 require 'active_record/connection_adapters/statement_pool'
+require 'arel/visitors/bind_visitor'
 
 module ActiveRecord
   class Base
@@ -45,7 +46,7 @@ module ActiveRecord
       username    = config[:username]
       password    = config[:password]
       db          = Informix.connect(database, username, password)
-      ConnectionAdapters::InformixAdapter.new(db, logger)
+      ConnectionAdapters::InformixAdapter.new(db, logger, config)
     end
 
     after_save :write_lobs
@@ -129,11 +130,17 @@ module ActiveRecord
     # * <tt>:password</tt>  -- Defaults to nothing.
 
     class InformixAdapter < AbstractAdapter
-      def initialize(db, logger)
-        super
+      def initialize(db, logger, config)
+        super(db, logger)
         @ifx_version = db.version.major.to_i
 
         @quoted_column_names, @quoted_table_names = {}, {}
+
+        if config.fetch(:prepared_statements) { true }
+          @visitor = Arel::Visitors::Informix.new self
+        else
+          @visitor = BindSubstitution.new self
+        end
 
       end
 
@@ -152,6 +159,13 @@ module ActiveRecord
           :binary      => { :name => "byte"},
           :boolean     => { :name => "boolean"}
         }
+      end
+      
+      attr_reader :last_arel
+      @last_arel = nil
+      def to_sql(arel, binds=[])
+        @last_arel = arel
+        super(arel, binds)
       end
 
       def adapter_name
@@ -218,7 +232,7 @@ module ActiveRecord
       end
 
       def quote_column_name(name) #:nodoc:
-        @quoted_column_names[name] ||= "`#{name.to_s.gsub('`', '``')}`"
+        @quoted_column_names[name] ||= "#{name.to_s.gsub('\'', '\'\'')}"
       end
 
       def quote_table_name(name) #:nodoc:
@@ -299,19 +313,35 @@ module ActiveRecord
       end
 
 
+      class BindSubstitution < Arel::Visitors::Informix # :nodoc:
+        include Arel::Visitors::BindVisitor
+      end
+      
+
       # DATABASE STATEMENTS =====================================
-      def select_all(sql, name = nil)
-        select(sql, name)
+      def select(sql, name = nil, binds = [])
+        c = log(sql, name) { @connection.cursor(sql) }
+        rows = c.open.fetch_hash_all
+        c.free
+        rows
       end
 
-      def select_one(sql, name = nil)
-        add_limit_offset!(sql, :limit => 1)
-        result = select(sql, name)
-        result.first if result
+      def select_rows(sql, name = nil)
+        c = log(sql, name) { @connection.cursor(sql) }
+        rows = c.open.fetch_all
+        c.free
+        rows
       end
 
       def execute(sql, name = nil)
         log(sql, name) { @connection.immediate(sql) }
+      end
+
+      def exec_query(sql, name = 'SQL', binds = [])
+        c = log(sql, name) { @connection.cursor(sql, :params => binds) }
+        rows = c.open.fetch_all
+        c.free
+        rows
       end
 
       def prepare(sql, name = nil)
@@ -427,22 +457,8 @@ module ActiveRecord
         nil
       end
 
-      def select_rows(sql, name = nil)
-        sql.gsub!(/=\s*null/i, 'IS NULL')
-        c = log(sql, name) { @connection.cursor(sql) }
-        rows = c.open.fetch_all
-        c.free
-        rows
-      end
 
       private
-        def select(sql, name = nil)
-          sql.gsub!(/=\s*null/i, 'IS NULL')
-          c = log(sql, name) { @connection.cursor(sql) }
-          rows = c.open.fetch_hash_all
-          c.free
-          rows
-        end
     end #class InformixAdapter < AbstractAdapter
   end #module ConnectionAdapters
 end #module ActiveRecord
