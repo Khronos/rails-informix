@@ -29,6 +29,8 @@
 require 'active_record/connection_adapters/abstract_adapter'
 require 'active_record/connection_adapters/statement_pool'
 require 'arel/visitors/bind_visitor'
+#We're going to hack around the state of the informix visitor for now.
+require 'arel/visitors/informix'
 
 module ActiveRecord
   class Base
@@ -136,11 +138,11 @@ module ActiveRecord
 
         @quoted_column_names, @quoted_table_names = {}, {}
 
-        if config.fetch(:prepared_statements) { true }
+#        if config.fetch(:prepared_statements) { true }
           @visitor = Arel::Visitors::Informix.new self
-        else
-          @visitor = BindSubstitution.new self
-        end
+#        else
+#          @visitor = BindSubstitution.new self
+#        end
 
       end
 
@@ -454,11 +456,76 @@ module ActiveRecord
       end
 
       def primary_key(table)
-        nil
+        #From a forum post about obtaining primary key in informix
+        #http://www.dbforums.com/informix/1622533-how-get-primary-key.html
+        sql=<<PK_QUERY
+        select colname 
+        from systables a, sysconstraints b, sysindexes c , syscolumns d
+        where a.tabname = "#{table}"
+        and a.tabid = b.tabid
+        and a.tabid = c.tabid 
+        and a.tabid = d.tabid
+        and b.constrtype ='P'
+        and b.idxname = c.idxname
+        and ( 
+          colno = part1 or 
+          colno = part2 or 
+          colno = part3 or 
+          colno = part4 or
+          colno = part5 or
+          colno = part6 or
+          colno = part7 or
+          colno = part8 or
+          colno = part9 or
+          colno = part10 or
+          colno = part11 or
+          colno = part12 or
+          colno = part13 or
+          colno = part14 or
+          colno = part15 or
+          colno = part16 
+          )
+PK_QUERY
+
+        @connection.cursor(sql) do |cur|
+          cur.open.fetch_all.flatten
+        end
       end
-
-
+      
+      
       private
     end #class InformixAdapter < AbstractAdapter
   end #module ConnectionAdapters
 end #module ActiveRecord
+
+module Arel
+  module Visitors
+    class Informix
+      undef :visit_Arel_Nodes_SelectStatement
+      def visit_Arel_Nodes_SelectStatement o
+        [
+          "SELECT",
+          (visit(o.offset) if o.offset),
+          (visit(o.limit) if o.limit),
+          (visit(o.with) if o.with),
+          o.cores.map { |x| visit_Arel_Nodes_SelectCore x }.join,
+          ("ORDER BY #{o.orders.map { |x| visit x }.join(', ')}" unless o.orders.empty?),
+          (visit(o.lock) if o.lock)
+        ].compact.join ' '
+      end
+
+      undef :visit_Arel_Nodes_SelectCore
+      def visit_Arel_Nodes_SelectCore o
+        [
+          (visit(o.top) if o.top),
+          (visit(o.set_quantifier) if o.set_quantifier),
+          ("#{o.projections.map { |x| visit x }.join ', '}" unless o.projections.empty?),
+          ("FROM #{visit(o.source)}" if o.source && !o.source.empty?),
+          ("WHERE #{o.wheres.map { |x| visit x }.join ' AND ' }" unless o.wheres.empty?),
+          ("GROUP BY #{o.groups.map { |x| visit x }.join ', ' }" unless o.groups.empty?),
+          (visit(o.having) if o.having)
+        ].compact.join ' '
+      end
+    end
+  end
+end
